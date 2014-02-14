@@ -30,6 +30,7 @@ import System.Exit
 
 import Types
 import Send
+import ConnectionPool
 
 mkApnsConf = do
   [certPath, keyPath, gwHost, gwPort] <- replicateM 4 await
@@ -46,7 +47,12 @@ mkApnsConf = do
       }
     }
 
-  return $ ApnsConf tlsParam gwHost (read gwPort) 5000000
+  let conf' = ApnsConf tlsParam gwHost (read gwPort) 5000000 undefined
+      mkConn = evalSendM connectApns conf'
+  pool <- liftIO $ mkPool mkConn 5
+  let conf = conf' { acConnPool = pool}
+
+  return conf
  where
   defP = defaultParamsClient
   Client defC = roleParams defP

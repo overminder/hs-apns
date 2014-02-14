@@ -22,6 +22,7 @@ import qualified Pipes.Attoparsec as PA
 import System.Timeout
 
 import Types
+import ConnectionPool
 
 -- Things to consider:
 --
@@ -58,7 +59,8 @@ data ApnsConf
     acTlsParam    :: Params,
     acHost        :: String,
     acPort        :: Int,
-    acRespTimeout :: Int -- Milliseconds
+    acRespTimeout :: Int, -- Milliseconds
+    acConnPool    :: ConnPool Context
   }
 
 type BsProdIO = Producer B.ByteString IO ()
@@ -68,15 +70,15 @@ send
   :: ApnsConf
   -> V.Vector Message
   -> IO [Response]
-send conf ms = run $ send' Nothing ms 0
- where
-  run m = snd <$> evalRWST m conf ()
+send conf ms = snd <$> evalRWST (send' Nothing ms 0) conf ()
+
+evalSendM m conf = fst <$> evalRWST m conf ()
 
 type SendM a = RWST ApnsConf [Response] () IO a
 
 send'
-  :: Maybe (BsProdIO, BsConsIO) -- SSL recv/send, or Nothing if conn is not
-                                -- established
+  :: Maybe (BsProdIO, BsConsIO, IO ())
+     -- SSL recv/send/close, or Nothing if conn is not established
   -> V.Vector Message           -- Messages to be sent
   -> Int                        -- Current index of msgs to be sent
   -> SendM ()
@@ -84,10 +86,13 @@ send' _ ms ix
   | ix >= V.length ms = return ()
 
 send' Nothing ms ix = do
-  ctx <- connectApns
-  send' (Just (PT.fromContext ctx, PT.toContext ctx)) ms ix
+  (ctx, onDone) <- getFromPool =<< asks acConnPool
+  let
+    closeCtx = try $ contextClose ctx :: IO (Either SomeException ())
+    ctx' = (PT.fromContext ctx, PT.toContext ctx, closeCtx >> onDone)
+  send' (Just ctx') ms ix
 
-send' ctxIO@(Just (fromCtx, toCtx)) ms ix = do
+send' ctxIO@(Just (fromCtx, toCtx, closeCtx)) ms ix = do
   timeoutMs <- asks acRespTimeout
 
   join $ liftIO $ do
@@ -152,14 +157,17 @@ send' ctxIO@(Just (fromCtx, toCtx)) ms ix = do
         -- go ahead with a new connection
         tell [resp]
         liftIO $ putStrLn $ "[send'.case] Skip this one due to " ++ show resp
+        liftIO $ closeCtx
         send' Nothing ms (resIdent resp + 1)
 
-      (Just _, _) -> return $
+      (Just _, _) -> return $ do
         -- Conn is fine and no resp: success!
+        liftIO $ closeCtx
         return ()
 
-      (Nothing, _) -> return $
+      (Nothing, _) -> return $ do
         -- Disconn and no resp: complete retry
+        liftIO $ closeCtx
         send' Nothing ms ix
 
 -- Either send all,
