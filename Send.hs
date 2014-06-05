@@ -86,7 +86,9 @@ send' _ ms ix
   | ix >= V.length ms = return ()
 
 send' Nothing ms ix = do
+  liftIO $ putStrLn "Connecting..."
   (ctx, onDone) <- getFromPool =<< asks acConnPool
+  liftIO $ putStrLn "Ok"
   let
     closeCtx = try $ contextClose ctx :: IO (Either SomeException ())
     ctx' = (PT.fromContext ctx, PT.toContext ctx, closeCtx >> onDone)
@@ -204,10 +206,12 @@ recvResp
 recvResp fromCtx rResp = do
   eiRes <- (`evalStateT` fromCtx) $ PA.parse parseResponse
   case eiRes of
-    Left e ->
+    Nothing ->
+      throwIO (ResponseParseError "Exhausted")
+    Just (Left e) ->
       -- XXX: parse error lol?
       throwIO (ResponseParseError $ show e)
-    Right (_, resp) ->
+    Just (Right resp) ->
       atomicWriteIORef rResp (Just resp)
 
 connectApns :: SendM Context
