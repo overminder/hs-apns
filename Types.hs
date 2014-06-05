@@ -14,6 +14,8 @@ import qualified Data.Text.Encoding as T
 import qualified Data.Serialize as S
 import Data.Data
 import Data.Time
+import Debug.Trace
+import Text.Printf
 import Data.Time.Clock.POSIX
 import Pipes
 
@@ -101,7 +103,8 @@ putMessage (Message {..}) = do
   S.putWord8 2
   let
     frame = S.runPut putFrame
-  S.putWord32be (fromIntegral . B.length $ frame)
+    len = fromIntegral . B.length $ frame
+  S.putWord32be (trace ("frameSiz = " ++ show len) len)
   S.putByteString frame
  where
   putFrame = do
@@ -117,7 +120,41 @@ putMessage (Message {..}) = do
     S.putByteString itemData
 
 parseMessage :: A.Parser Message
-parseMessage = undefined
+parseMessage = do
+  A.word8 2
+  frameLen <- A.anyWord32be
+  trace (printf "frameLen: %d" frameLen) $ return ()
+  frameBs <- A.take $ fromIntegral frameLen
+  let A.Done leftOver msg = A.parse parseFrame frameBs
+  if B.null leftOver
+    then return msg
+    else error $ "parseMessage: leftover: " ++ show leftOver
+ where
+  parseFrame = do
+    (1, 32) <- parseFrameHeader
+    tok <- A.take 32
+
+    (2, payloadLen) <- parseFrameHeader
+    pl <- A.take $ fromIntegral payloadLen
+
+    (3, 4) <- parseFrameHeader
+    ident <- A.anyWord32be
+
+    (4, 4) <- parseFrameHeader
+    epoch <- A.anyWord32be
+
+    (5, 1) <- parseFrameHeader
+    prior <- A.anyWord8
+
+    return $ Message {
+      msgDeviceToken = T.decodeUtf8 $ B16.encode tok,
+      msgIdent = fromIntegral ident,
+      msgPayload = T.decodeUtf8 pl,
+      msgExpiryDate = posixSecondsToUTCTime $ fromIntegral epoch,
+      msgPriority = toEnum $ fromIntegral prior
+    }
+
+  parseFrameHeader = (,) <$> A.anyWord8 <*> A.anyWord16be
 
 fromResponse :: Monad m => Response -> Producer B.ByteString m ()
 fromResponse resp = undefined
