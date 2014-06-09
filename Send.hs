@@ -1,28 +1,30 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables, PackageImports #-}
 
 module Send where
 
 import Control.Applicative
 import Control.Exception
-import Control.Concurrent
+import Control.Concurrent hiding (yield)
 import Control.Concurrent.Async
-import Control.Monad.RWS.Strict
-import Control.Monad.State.Strict
+import "mtl" Control.Monad.RWS.Strict
+import "mtl" Control.Monad.State.Strict
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
 import Crypto.Random.AESCtr
 import Data.IORef
 import Data.Certificate.X509
 import qualified Data.Vector as V
 import Network
 import Network.TLS
-import Network.TLS.Extra
+import "tls" Network.TLS.Extra
 import Pipes
-import qualified Pipes.Network.TCP.TLS as PT
 import qualified Pipes.Attoparsec as PA
 import System.Timeout
 
 import Types
 import ConnectionPool
+
+traceM _ = return ()
 
 -- Things to consider:
 --
@@ -56,7 +58,7 @@ import ConnectionPool
 
 data ApnsConf
   = ApnsConf {
-    acTlsParam    :: Params,
+    acTlsParam    :: ClientParams,
     acHost        :: String,
     acPort        :: Int,
     acRespTimeout :: Int, -- Milliseconds
@@ -86,12 +88,12 @@ send' _ ms ix
   | ix >= V.length ms = return ()
 
 send' Nothing ms ix = do
-  liftIO $ putStrLn "Connecting..."
+  traceM "Connecting..."
   (ctx, onDone) <- getFromPool =<< asks acConnPool
-  liftIO $ putStrLn "Ok"
+  traceM "Ok"
   let
     closeCtx = try $ contextClose ctx :: IO (Either SomeException ())
-    ctx' = (PT.fromContext ctx, PT.toContext ctx, closeCtx >> onDone)
+    ctx' = (fromContext ctx, toContext ctx, closeCtx >> onDone)
   send' (Just ctx') ms ix
 
 send' ctxIO@(Just (fromCtx, toCtx, closeCtx)) ms ix = do
@@ -125,7 +127,7 @@ send' ctxIO@(Just (fromCtx, toCtx, closeCtx)) ms ix = do
     -- SSL transport though.
     ctxIO' <- case sendRes of
       Left e -> do
-        putStrLn $ "[send'.tSend] " ++ show e
+        traceM $ "[send'.tSend] " ++ show e
         throwIO e `catch` (\ (e :: IOException) -> do
           -- Should be socket error
           return Nothing)
@@ -136,7 +138,7 @@ send' ctxIO@(Just (fromCtx, toCtx, closeCtx)) ms ix = do
     recvRes <- waitCatch tRecv
     ctxIO'' <- case recvRes of
       Left e -> do
-        putStrLn $ "[send'.tRecv] " ++ show e
+        traceM $ "[send'.tRecv] " ++ show e
         throwIO e `catches`
           [ Handler $ \ (e :: AsyncException) -> case e of
               ThreadKilled ->
@@ -158,7 +160,7 @@ send' ctxIO@(Just (fromCtx, toCtx, closeCtx)) ms ix = do
         -- got resp: skip this msg, record the resp and
         -- go ahead with a new connection
         tell [resp]
-        liftIO $ putStrLn $ "[send'.case] Skip this one due to " ++ show resp
+        traceM $ "[send'.case] Skip this one due to " ++ show resp
         liftIO $ closeCtx
         send' Nothing ms (resIdent resp + 1)
 
@@ -186,7 +188,7 @@ sendOnce toCtx ms ix mResp = go ix
   go i
     | i >= mLen = return ()
     | otherwise = do
-        putStrLn $ "[sendOnce.go] Sending msgs[" ++ show i ++
+        traceM $ "[sendOnce.go] Sending msgs[" ++ show i ++
                    "] of " ++ show mLen
         mbResp <- readIORef mResp
         case mbResp of
@@ -222,7 +224,21 @@ connectApns = do
   liftIO $ do
     h <- connectTo host (PortNumber $ fromIntegral port)
     rng <- makeSystem
-    ctx <- contextNewOnHandle h tlsParam rng
+    ctx <- contextNew h tlsParam rng
     handshake ctx
     return ctx
+
+-- Pipes-TLS
+
+fromContext :: Context -> Producer B.ByteString IO ()
+fromContext ctx = forever go
+ where
+  go = lift (recvData ctx) >>= yield
+
+toContext :: Context -> Consumer B.ByteString IO ()
+toContext ctx = forever go
+ where
+  go = do
+    xs <- await
+    lift (sendData ctx (BL.fromChunks [xs]) >> contextFlush ctx)
 

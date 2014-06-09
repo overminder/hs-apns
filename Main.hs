@@ -1,5 +1,7 @@
+{-# LANGUAGE PackageImports #-}
+
 import Control.Applicative
-import Control.Monad.State.Strict
+import "mtl" Control.Monad.State.Strict
 import Control.Concurrent.STM
 import Control.Concurrent.Async
 import Control.Concurrent hiding (yield)
@@ -7,10 +9,9 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Network
 import Network.TLS
-import Network.TLS.Extra
-import System.Time
-import System.Time.Utils
+import "tls" Network.TLS.Extra
 import Data.Time
+import Data.Default
 
 import Pipes
 import qualified Pipes.Prelude as P
@@ -35,15 +36,23 @@ import ConnectionPool
 mkApnsConf = do
   [certPath, keyPath, gwHost, gwPort] <- replicateM 4 await
 
-  cert <- liftIO $ fileReadCertificate certPath
-  key <- liftIO $ fileReadPrivateKey keyPath
+  Right cred <- liftIO $ credentialLoadX509 certPath keyPath
   let
-    p12 = [(cert, Just key)]
-    tlsParam = defP {
-      pCiphers = ciphersuite_all,
-      pCertificates = p12,
-      roleParams = Client $ defC {
-        onCertificateRequest = const $ return p12
+    tlsParam = ClientParams {
+      clientUseMaxFragmentLength = Nothing,
+      clientServerIdentification = (gwHost, B.empty),
+      clientUseServerNameIndication = False,
+      clientWantSessionResume = Nothing,
+      clientShared = def {
+        sharedCredentials = Credentials [cred]
+      },
+      clientHooks = def {
+        onCertificateRequest = const $ return $ Just cred,
+        onServerCertificate = \ _ _ _ _ -> return []
+        -- ^ This one.
+      },
+      clientSupported = def {
+        supportedCiphers = ciphersuite_all
       }
     }
 
@@ -53,9 +62,6 @@ mkApnsConf = do
   let conf = conf' { acConnPool = pool}
 
   return conf
- where
-  defP = defaultParamsClient
-  Client defC = roleParams defP
 
 readMessageInput fromInput = P.toListM $ fromInput >-> parseLines 0
  where
@@ -96,6 +102,8 @@ main = do
   -- might interfere with UAT feedback service.
   conf <- runEffect $ (fromFile >> return undefined) >-> mkApnsConf
   msgs <- V.fromList <$> readMessageInput fromFile
+
+  resizePool 10 (acConnPool conf)
   
   resps <- send conf msgs
   print resps

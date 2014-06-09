@@ -19,6 +19,9 @@ import Text.Printf
 import Data.Time.Clock.POSIX
 import Pipes
 
+trace2 :: String -> a -> a
+trace2 = const id
+
 data Message
   = Message {
     msgDeviceToken :: !T.Text,
@@ -104,7 +107,7 @@ putMessage (Message {..}) = do
   let
     frame = S.runPut putFrame
     len = fromIntegral . B.length $ frame
-  S.putWord32be (trace ("frameSiz = " ++ show len) len)
+  S.putWord32be (trace2 ("frameSiz = " ++ show len) len)
   S.putByteString frame
  where
   putFrame = do
@@ -123,7 +126,7 @@ parseMessage :: A.Parser Message
 parseMessage = do
   A.word8 2
   frameLen <- A.anyWord32be
-  trace (printf "frameLen: %d" frameLen) $ return ()
+  trace2 (printf "frameLen: %d" frameLen) $ return ()
   frameBs <- A.take $ fromIntegral frameLen
   let A.Done leftOver msg = A.parse parseFrame frameBs
   if B.null leftOver
